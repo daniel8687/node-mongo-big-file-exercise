@@ -4,7 +4,7 @@ const csv = require('csv-parser');
 const Records = require('./records.model');
 
 const upload = async (req, res) => {
-    const {file} = req;
+    const { file } = req;
 
     try {
         if (!file) {
@@ -12,30 +12,50 @@ const upload = async (req, res) => {
         }
 
         const filePath = `./_temp/${file.filename}`;
-        const results = [];
-        const BATCH_SIZE = 1000;
+        const BATCH_SIZE = 5000;
         let batch = [];
+        let pendingWrites = 0;
+        let maxPendingWrites = 5;
 
         const stream = fs.createReadStream(filePath)
-            .pipe(csv({ separator: ',' }));
+            .pipe(csv({ separator: ',', strict: true }));
 
-        stream.on('data', async (data) => {
+        const processBatch = async (currentBatch) => {
+            pendingWrites++;
+            try {
+                await Records.insertMany(currentBatch, { ordered: false, lean: true });
+            } catch (err) {
+                console.error('Error al insertar el batch:', err);
+            }
+            pendingWrites--;
+        };
+
+        stream.on('data', (data) => {
             batch.push(data);
-            if (batch.length >= BATCH_SIZE) {
-            stream.pause();
-            await Records.insertMany(batch);
-            batch = [];
-            stream.resume();
+            if (batch.length >= BATCH_SIZE && pendingWrites < maxPendingWrites) {
+                const currentBatch = batch;
+                batch = [];
+                processBatch(currentBatch);
             }
         });
 
         stream.on('end', async () => {
+            const waitForPending = async () => {
+                if (pendingWrites > 0) {
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    return waitForPending();
+                }
+                return true;
+            };
+
+            await waitForPending();
+
             if (batch.length > 0) {
-            await Records.insertMany(batch);
+                await processBatch(batch);
             }
 
             fs.unlink(filePath, (err) => {
-            if (err) console.error('Error al eliminar archivo:', err);
+                if (err) console.error('Error al eliminar archivo:', err);
             });
 
             res.status(200).json({ message: 'Archivo procesado con éxito' });
@@ -57,7 +77,7 @@ const list = async (_, res) => {
             .find({})
             .limit(10)
             .lean();
-        
+
         return res.status(200).json(data);
     } catch (err) {
         return res.status(500).json(err);
